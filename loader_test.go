@@ -98,6 +98,11 @@ type HeredocVarsConfig struct {
 	MySubVar  string           `hcl:"mysubvar,attr"`
 }
 
+type BadFieldConfig struct {
+	Database DatabaseConfig `hcl:"database,block"`
+	Count    int            `hcl:"count,attr"`
+}
+
 // --- Tests ---
 
 func TestLoadFile_Simple(t *testing.T) {
@@ -272,6 +277,128 @@ database {
 	expected := "postgres://dbhost:3306/mydb"
 	if cfg.App.DBUrl != expected {
 		t.Errorf("app.db_url = %q, want %q", cfg.App.DBUrl, expected)
+	}
+}
+
+func TestDiagnosticsError_IncludesLocation(t *testing.T) {
+	// Parse error: invalid HCL syntax should report file and line
+	src := []byte(`
+database {
+    host = "localhost"
+    port = !!!
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "bad.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "bad.hcl") {
+		t.Errorf("error should contain filename, got: %s", msg)
+	}
+	if !strings.Contains(msg, ":4,") {
+		t.Errorf("error should contain line number, got: %s", msg)
+	}
+}
+
+func TestDiagnosticsError_IncludesDetail(t *testing.T) {
+	// Reference to an undefined variable should include detail text
+	src := []byte(`
+database {
+    host = undefined_var
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "detail.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	diagErr, ok := err.(*DiagnosticsError)
+	if !ok {
+		t.Fatalf("expected DiagnosticsError, got %T: %v", err, err)
+	}
+	msg := diagErr.Error()
+	// Should contain filename and line
+	if !strings.Contains(msg, "detail.hcl") {
+		t.Errorf("error should contain filename, got: %s", msg)
+	}
+	// Should contain both summary and detail
+	if !strings.Contains(msg, ":") {
+		t.Errorf("error should contain separator between summary and detail, got: %s", msg)
+	}
+	// The message should be more than just a bare summary
+	if len(msg) < 20 {
+		t.Errorf("error message too short, expected location and detail, got: %s", msg)
+	}
+}
+
+func TestDiagnosticsError_BlockErrorIncludesBlockContext(t *testing.T) {
+	// Unknown attribute inside a block should mention the block
+	src := []byte(`
+database {
+    host = "localhost"
+    port = 5432
+    unknown_field = "oops"
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "block.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "block.hcl") {
+		t.Errorf("error should contain filename, got: %s", msg)
+	}
+}
+
+func TestDiagnosticsError_UndefinedRefInBlock(t *testing.T) {
+	// Reference to an undefined block should report location
+	src := []byte(`
+app {
+    db_url = "postgres://${nonexistent.host}/mydb"
+}
+`)
+	var cfg CrossRefConfig
+	err := Load(src, "ref.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	diagErr, ok := err.(*DiagnosticsError)
+	if !ok {
+		t.Fatalf("expected DiagnosticsError, got %T: %v", err, err)
+	}
+	msg := diagErr.Error()
+	if !strings.Contains(msg, "ref.hcl") {
+		t.Errorf("error should contain filename, got: %s", msg)
+	}
+	if !strings.Contains(msg, "3,") || !strings.Contains(msg, ":3,") {
+		t.Errorf("error should reference line 3, got: %s", msg)
+	}
+}
+
+func TestDiagnosticsError_LabeledBlockError(t *testing.T) {
+	// Bad attribute inside a labeled block
+	src := []byte(`
+service "api" {
+    host = "localhost"
+    port = 8080
+    bogus = true
+}
+`)
+	type MinimalLabeledConfig struct {
+		Services []ServiceConfig `hcl:"service,block"`
+	}
+	var cfg MinimalLabeledConfig
+	err := Load(src, "labeled.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "labeled.hcl") {
+		t.Errorf("error should contain filename, got: %s", msg)
 	}
 }
 

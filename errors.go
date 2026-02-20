@@ -24,7 +24,16 @@ type DiagnosticsError struct {
 func (e *DiagnosticsError) Error() string {
 	var msgs []string
 	for _, d := range e.Diags {
-		msgs = append(msgs, d.Summary)
+		var msg strings.Builder
+		if d.Subject != nil {
+			fmt.Fprintf(&msg, "%s:%d,%d: ", d.Subject.Filename, d.Subject.Start.Line, d.Subject.Start.Column)
+		}
+		msg.WriteString(d.Summary)
+		if d.Detail != "" {
+			msg.WriteString(": ")
+			msg.WriteString(d.Detail)
+		}
+		msgs = append(msgs, msg.String())
 	}
-	return fmt.Sprintf("HCL diagnostics: %s", strings.Join(msgs, "; "))
+	return strings.Join(msgs, "\n")
 }

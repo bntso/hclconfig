@@ -151,7 +151,8 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 			}
 			if fi, ok := attrFieldMap[key]; ok {
 				if err := setCtyValueOnField(dstVal.Field(fi), val); err != nil {
-					return fmt.Errorf("attribute %s: %w", key, err)
+					r := attr.Expr.Range()
+					return fmt.Errorf("%s:%d,%d: attribute %q: %w", r.Filename, r.Start.Line, r.Start.Column, key, err)
 				}
 			}
 			evalCtx.Variables[key] = val
@@ -182,13 +183,13 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 			newVal := reflect.New(elemType)
 			diags := gohcl.DecodeBody(blocks[0].Body, evalCtx, newVal.Interface())
 			if diags.HasErrors() {
-				return &DiagnosticsError{Diags: diags}
+				return wrapBlockDiags(blocks[0], diags)
 			}
 			fieldVal.Set(newVal)
 		} else {
 			diags := gohcl.DecodeBody(blocks[0].Body, evalCtx, fieldVal.Addr().Interface())
 			if diags.HasErrors() {
-				return &DiagnosticsError{Diags: diags}
+				return wrapBlockDiags(blocks[0], diags)
 			}
 		}
 
@@ -278,7 +279,7 @@ func decodeSliceBlocks(fieldVal reflect.Value, blocks []*hcl.Block, evalCtx *hcl
 
 		diags := gohcl.DecodeBody(block.Body, evalCtx, newVal.Interface())
 		if diags.HasErrors() {
-			return &DiagnosticsError{Diags: diags}
+			return wrapBlockDiags(block, diags)
 		}
 
 		if isElemPtr {
@@ -304,6 +305,34 @@ func setLabelFields(rv reflect.Value, labels []string) {
 			labelIdx++
 		}
 	}
+}
+
+// wrapBlockDiags wraps decode diagnostics with block type, label, and definition range
+// so that errors clearly identify which block caused the failure.
+func wrapBlockDiags(block *hcl.Block, diags hcl.Diagnostics) error {
+	label := ""
+	if len(block.Labels) > 0 {
+		label = fmt.Sprintf(" %q", block.Labels[0])
+	}
+	wrapped := make(hcl.Diagnostics, len(diags))
+	for i, d := range diags {
+		cp := *d
+		detail := fmt.Sprintf("In %s%s block", block.Type, label)
+		if d.Subject != nil {
+			detail += fmt.Sprintf(" defined at %s:%d", d.Subject.Filename, d.Subject.Start.Line)
+		} else {
+			detail += fmt.Sprintf(" at %s:%d", block.DefRange.Filename, block.DefRange.Start.Line)
+		}
+		if d.Detail != "" {
+			detail += ": " + d.Detail
+		}
+		cp.Detail = detail
+		if cp.Subject == nil {
+			cp.Subject = block.DefRange.Ptr()
+		}
+		wrapped[i] = &cp
+	}
+	return &DiagnosticsError{Diags: wrapped}
 }
 
 func addLabeledSliceToEvalCtx(evalCtx *hcl.EvalContext, typeName string, sliceVal reflect.Value) {
