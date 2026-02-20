@@ -49,3 +49,24 @@ The library has a single-package design with a clear pipeline:
 ### Test structure
 
 Tests live alongside source files (`*_test.go`). Each test file defines its own struct types. Integration tests in `loader_test.go` use HCL fixtures from `testdata/`.
+
+## Workflow
+
+### Proposals and GitHub Issues
+
+- New feature ideas, improvements, and bug reports should be tracked as GitHub issues using `gh issue create`.
+- Each issue should include: a **Problem** section, a **Proposal** section with concrete code examples, and a **Priority** (High/Medium/Low).
+- Before starting work on a feature, check existing issues with `gh issue list` to avoid duplicates and to pick up existing proposals.
+- Reference the issue number in commit messages when implementing (e.g., "Add LoadReader function (closes #3)").
+
+### Releases
+
+- Follow semver: patch (`v0.2.x`) for bug fixes and non-breaking improvements, minor (`v0.x.0`) for new features, major for breaking changes.
+- Create releases with `gh release create` including a changelog in the release notes.
+- After tagging a release, update the install version in `README.md` and push.
+
+### Commits
+
+- Keep commits focused — one logical change per commit.
+- Write commit messages that explain the "why", not just the "what".
+- Always run `go test ./...` before committing to ensure nothing is broken.
