@@ -74,9 +74,17 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 		}
 	}
 
-	// 5. Build dependency graph and topological sort
-	deps := buildDependencyGraph(content.Blocks, blockInfos)
-	sortedKeys, err := topoSort(blockInfos, deps)
+	// 5. Build dependency graph (blocks + top-level attributes) and topological sort
+	deps := buildDependencyGraph(content.Blocks, blockInfos, content.Attributes)
+
+	// Combined infos for topo sort: blocks first, then attributes
+	var allInfos []blockInfo
+	allInfos = append(allInfos, blockInfos...)
+	for name := range content.Attributes {
+		allInfos = append(allInfos, blockInfo{typeName: name, isAttr: true})
+	}
+
+	sortedKeys, err := topoSort(allInfos, deps)
 	if err != nil {
 		return err
 	}
@@ -84,17 +92,18 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 	// 6. Build eval context
 	evalCtx := newBaseEvalContext(o.evalCtx)
 
-	// 7. Decode blocks in topological order
+	// 7. Decode in topological order (both blocks and attributes)
 	dstVal := reflect.ValueOf(dst).Elem()
 	dstType := dstVal.Type()
 
-	// Build a map from block type -> field info
+	// Build maps from name -> field info for blocks and attributes
 	type fieldInfo struct {
 		fieldIndex int
 		isSlice    bool
 		isPtr      bool
 	}
-	fieldMap := make(map[string]fieldInfo)
+	blockFieldMap := make(map[string]fieldInfo)
+	attrFieldMap := make(map[string]int) // attr name -> struct field index
 	for i := 0; i < dstType.NumField(); i++ {
 		field := dstType.Field(i)
 		tag := field.Tag.Get("hcl")
@@ -102,16 +111,25 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 			continue
 		}
 		name, kind := parseHCLTag(tag)
-		if kind == "block" {
+		switch kind {
+		case "block":
 			ft := field.Type
 			isPtr := ft.Kind() == reflect.Ptr
 			isSlice := ft.Kind() == reflect.Slice
-			fieldMap[name] = fieldInfo{
+			blockFieldMap[name] = fieldInfo{
 				fieldIndex: i,
 				isSlice:    isSlice,
 				isPtr:      isPtr,
 			}
+		case "attr", "optional":
+			attrFieldMap[name] = i
 		}
+	}
+
+	// Build set of attribute names for dispatch in the decode loop
+	attrNames := make(map[string]bool)
+	for name := range content.Attributes {
+		attrNames[name] = true
 	}
 
 	// Group blocks by key for decoding
@@ -124,14 +142,30 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 	}
 
 	for _, key := range sortedKeys {
+		// --- Top-level attribute ---
+		if attrNames[key] {
+			attr := content.Attributes[key]
+			val, diags := attr.Expr.Value(evalCtx)
+			if diags.HasErrors() {
+				return &DiagnosticsError{Diags: diags}
+			}
+			if fi, ok := attrFieldMap[key]; ok {
+				if err := setCtyValueOnField(dstVal.Field(fi), val); err != nil {
+					return fmt.Errorf("attribute %s: %w", key, err)
+				}
+			}
+			evalCtx.Variables[key] = val
+			continue
+		}
+
+		// --- Block ---
 		blocks := blocksByKey[key]
 		if len(blocks) == 0 {
 			continue
 		}
 
-		// Determine the block type name (first part of key)
 		typeName := blocks[0].Type
-		fi, ok := fieldMap[typeName]
+		fi, ok := blockFieldMap[typeName]
 		if !ok {
 			continue
 		}
@@ -139,13 +173,11 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 		fieldVal := dstVal.Field(fi.fieldIndex)
 
 		if fi.isSlice {
-			// Slice of blocks (including labeled)
 			err := decodeSliceBlocks(fieldVal, blocks, evalCtx)
 			if err != nil {
 				return err
 			}
 		} else if fi.isPtr {
-			// Optional single block
 			elemType := fieldVal.Type().Elem()
 			newVal := reflect.New(elemType)
 			diags := gohcl.DecodeBody(blocks[0].Body, evalCtx, newVal.Interface())
@@ -154,26 +186,22 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 			}
 			fieldVal.Set(newVal)
 		} else {
-			// Single block
 			diags := gohcl.DecodeBody(blocks[0].Body, evalCtx, fieldVal.Addr().Interface())
 			if diags.HasErrors() {
 				return &DiagnosticsError{Diags: diags}
 			}
 		}
 
-		// After decoding, add to eval context
+		// After decoding block, add to eval context
 		infos := blockInfoByKey[key]
 		if fi.isSlice && len(infos) > 0 && infos[0].label != "" {
-			// Labeled blocks in a slice — each gets added to eval context under its label
 			addLabeledSliceToEvalCtx(evalCtx, typeName, fieldVal)
 		} else if fi.isSlice {
-			// Unlabeled slice — add as the type name
 			val, err := structToCtyValue(fieldVal.Interface())
 			if err == nil && val != cty.NilVal {
 				evalCtx.Variables[typeName] = val
 			}
 		} else {
-			// Single block
 			var iface interface{}
 			if fi.isPtr {
 				if !fieldVal.IsNil() {
@@ -191,6 +219,48 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 		}
 	}
 
+	return nil
+}
+
+// setCtyValueOnField sets a struct field from a cty.Value.
+func setCtyValueOnField(fieldVal reflect.Value, val cty.Value) error {
+	switch fieldVal.Kind() {
+	case reflect.String:
+		fieldVal.SetString(val.AsString())
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		bf := val.AsBigFloat()
+		i, _ := bf.Int64()
+		fieldVal.SetInt(i)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		bf := val.AsBigFloat()
+		u, _ := bf.Uint64()
+		fieldVal.SetUint(u)
+	case reflect.Float32, reflect.Float64:
+		bf := val.AsBigFloat()
+		f, _ := bf.Float64()
+		fieldVal.SetFloat(f)
+	case reflect.Bool:
+		fieldVal.SetBool(val.True())
+	case reflect.Slice:
+		return setSliceFromCty(fieldVal, val)
+	default:
+		return fmt.Errorf("unsupported field kind %s", fieldVal.Kind())
+	}
+	return nil
+}
+
+func setSliceFromCty(fieldVal reflect.Value, val cty.Value) error {
+	if !val.Type().IsListType() && !val.Type().IsTupleType() && !val.Type().IsSetType() {
+		return fmt.Errorf("cannot convert %s to slice", val.Type().FriendlyName())
+	}
+	elems := val.AsValueSlice()
+	slice := reflect.MakeSlice(fieldVal.Type(), len(elems), len(elems))
+	for i, elem := range elems {
+		if err := setCtyValueOnField(slice.Index(i), elem); err != nil {
+			return fmt.Errorf("element %d: %w", i, err)
+		}
+	}
+	fieldVal.Set(slice)
 	return nil
 }
 

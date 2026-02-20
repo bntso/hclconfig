@@ -112,7 +112,7 @@ app {
 		{typeName: "app", index: 1},
 	}
 
-	deps := buildDependencyGraph(content.Blocks, infos)
+	deps := buildDependencyGraph(content.Blocks, infos, nil)
 
 	if !deps["app"]["database"] {
 		t.Errorf("expected app to depend on database, got: %v", deps["app"])

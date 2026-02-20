@@ -2,6 +2,7 @@ package hclconfig
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/hcl/v2"
@@ -80,6 +81,21 @@ type CycleConfig struct {
 type OptionalConfig struct {
 	Database DatabaseConfig `hcl:"database,block"`
 	App      *AppConfig     `hcl:"app,block"`
+}
+
+type InstanceConfig struct {
+	Name     string   `hcl:"name,label"`
+	NoRun    bool     `hcl:"norun,attr"`
+	Image    string   `hcl:"image,attr"`
+	Networks []string `hcl:"networks,attr"`
+	Build    []string `hcl:"build,attr"`
+}
+
+type HeredocVarsConfig struct {
+	Group     string           `hcl:"group,attr"`
+	Instances []InstanceConfig `hcl:"instance,block"`
+	MyVar     string           `hcl:"myvar,attr"`
+	MySubVar  string           `hcl:"mysubvar,attr"`
 }
 
 // --- Tests ---
@@ -256,5 +272,60 @@ database {
 	expected := "postgres://dbhost:3306/mydb"
 	if cfg.App.DBUrl != expected {
 		t.Errorf("app.db_url = %q, want %q", cfg.App.DBUrl, expected)
+	}
+}
+
+func TestLoadFile_HeredocVars(t *testing.T) {
+	var cfg HeredocVarsConfig
+	err := LoadFile("testdata/heredoc_vars.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Top-level simple attribute
+	if cfg.Group != "mygroup" {
+		t.Errorf("group = %q, want %q", cfg.Group, "mygroup")
+	}
+
+	// mysubvar has no dependencies — should resolve directly
+	if !strings.Contains(cfg.MySubVar, "pgdg/apt.postgresql.org.sh") {
+		t.Errorf("mysubvar should contain pgdg script, got: %q", cfg.MySubVar)
+	}
+
+	// myvar depends on mysubvar — should contain the resolved content
+	if !strings.Contains(cfg.MyVar, "postgresql-common") {
+		t.Errorf("myvar should contain postgresql-common, got: %q", cfg.MyVar)
+	}
+	if !strings.Contains(cfg.MyVar, "pgdg/apt.postgresql.org.sh") {
+		t.Errorf("myvar should contain resolved mysubvar, got: %q", cfg.MyVar)
+	}
+
+	// Instance block
+	if len(cfg.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(cfg.Instances))
+	}
+	inst := cfg.Instances[0]
+	if inst.Name != "mytest" {
+		t.Errorf("instance name = %q, want %q", inst.Name, "mytest")
+	}
+	if !inst.NoRun {
+		t.Error("expected norun to be true")
+	}
+	if inst.Image != "images:ubuntu/24.04" {
+		t.Errorf("image = %q, want %q", inst.Image, "images:ubuntu/24.04")
+	}
+	if len(inst.Networks) != 1 || inst.Networks[0] != "web" {
+		t.Errorf("networks = %v, want [web]", inst.Networks)
+	}
+
+	// build should contain resolved myvar (which itself contains resolved mysubvar)
+	if len(inst.Build) != 1 {
+		t.Fatalf("expected 1 build entry, got %d", len(inst.Build))
+	}
+	if !strings.Contains(inst.Build[0], "postgresql-common") {
+		t.Errorf("build[0] should contain resolved myvar, got: %q", inst.Build[0])
+	}
+	if !strings.Contains(inst.Build[0], "pgdg/apt.postgresql.org.sh") {
+		t.Errorf("build[0] should contain fully resolved chain, got: %q", inst.Build[0])
 	}
 }

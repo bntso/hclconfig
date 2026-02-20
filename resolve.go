@@ -5,11 +5,12 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
-// blockInfo holds metadata about a block for dependency analysis.
+// blockInfo holds metadata about a block or top-level attribute for dependency analysis.
 type blockInfo struct {
 	typeName string
-	label    string // empty for unlabeled blocks
+	label    string // empty for unlabeled blocks and attributes
 	index    int    // position in the original block list
+	isAttr   bool   // true if this represents a top-level attribute
 }
 
 func (b blockInfo) key() string {
@@ -19,16 +20,28 @@ func (b blockInfo) key() string {
 	return b.typeName
 }
 
-// buildDependencyGraph analyzes the blocks in the body and returns a map of
-// block key -> set of block keys it depends on.
-func buildDependencyGraph(blocks []*hcl.Block, blockInfos []blockInfo) map[string]map[string]bool {
-	// Build set of known block type names
+// buildDependencyGraph analyzes blocks and top-level attributes, returning a
+// map of node key -> set of node keys it depends on.
+func buildDependencyGraph(blocks []*hcl.Block, blockInfos []blockInfo, attrs map[string]*hcl.Attribute) map[string]map[string]bool {
+	// Build set of known names (block types + attribute names)
 	knownTypes := make(map[string]bool)
 	for _, bi := range blockInfos {
 		knownTypes[bi.typeName] = true
 	}
+	for name := range attrs {
+		knownTypes[name] = true
+	}
+
+	// Combine block and attribute infos for labeled-block lookups in addDependency
+	var allInfos []blockInfo
+	allInfos = append(allInfos, blockInfos...)
+	for name := range attrs {
+		allInfos = append(allInfos, blockInfo{typeName: name, isAttr: true})
+	}
 
 	deps := make(map[string]map[string]bool)
+
+	// Analyze block dependencies
 	for i, block := range blocks {
 		bi := blockInfos[i]
 		key := bi.key()
@@ -36,17 +49,25 @@ func buildDependencyGraph(blocks []*hcl.Block, blockInfos []blockInfo) map[strin
 			deps[key] = make(map[string]bool)
 		}
 
-		// Extract variables from all attributes in the block body
-		attrs, _ := block.Body.JustAttributes()
-		for _, attr := range attrs {
+		bodyAttrs, _ := block.Body.JustAttributes()
+		for _, attr := range bodyAttrs {
 			for _, traversal := range attr.Expr.Variables() {
-				addDependency(deps, key, traversal, knownTypes, blockInfos)
+				addDependency(deps, key, traversal, knownTypes, allInfos)
 			}
 		}
 
-		// Also check nested blocks for variables
 		if syntaxBody, ok := block.Body.(*hclsyntax.Body); ok {
-			extractNestedBlockDeps(deps, key, syntaxBody.Blocks, knownTypes, blockInfos)
+			extractNestedBlockDeps(deps, key, syntaxBody.Blocks, knownTypes, allInfos)
+		}
+	}
+
+	// Analyze top-level attribute dependencies
+	for name, attr := range attrs {
+		if deps[name] == nil {
+			deps[name] = make(map[string]bool)
+		}
+		for _, traversal := range attr.Expr.Variables() {
+			addDependency(deps, name, traversal, knownTypes, allInfos)
 		}
 	}
 
