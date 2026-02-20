@@ -1,11 +1,11 @@
 # hclconfig
 
-A Go library that parses HCL configuration files with **cross-block variable resolution** and a built-in `env()` function. Define your config schema as Go structs with `hcl` struct tags — the library handles dependency-aware ordered decoding so that `${database.host}` in one block resolves to the value from another block automatically.
+A Go library that parses HCL configuration files with **cross-block and cross-attribute variable resolution** and a built-in `env()` function. Define your config schema as Go structs with `hcl` struct tags — the library handles dependency-aware ordered decoding so that `${database.host}` in one block or `${myvar}` in an attribute resolves automatically.
 
 ## Install
 
 ```bash
-go get github.com/bntso/hclconfig@v0.1.0
+go get github.com/bntso/hclconfig@v0.2.0
 ```
 
 ## Usage
@@ -67,6 +67,54 @@ app {
     db_url = "postgres://${database.host}:${database.port}/mydb"
 }
 ```
+
+### Top-level attribute references
+
+Top-level attributes can reference each other and be referenced from blocks. Dependencies are resolved across both attributes and blocks in a unified dependency graph.
+
+```hcl
+group = "mygroup"
+
+instance "mytest" {
+    norun    = true
+    image    = "images:ubuntu/24.04"
+    networks = ["web"]
+    build = [
+        <<-SETUPEOF
+        ${myvar}
+        SETUPEOF
+    ]
+}
+
+myvar = <<-EOF
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt install -y postgresql-common
+    ${mysubvar}
+    EOF
+
+mysubvar = <<-EOF
+    sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+    EOF
+```
+
+```go
+type InstanceConfig struct {
+    Name     string   `hcl:"name,label"`
+    NoRun    bool     `hcl:"norun,attr"`
+    Image    string   `hcl:"image,attr"`
+    Networks []string `hcl:"networks,attr"`
+    Build    []string `hcl:"build,attr"`
+}
+
+type Config struct {
+    Group     string           `hcl:"group,attr"`
+    Instances []InstanceConfig `hcl:"instance,block"`
+    MyVar     string           `hcl:"myvar,attr"`
+    MySubVar  string           `hcl:"mysubvar,attr"`
+}
+```
+
+The resolution chain `mysubvar` -> `myvar` -> `instance.build` is resolved automatically regardless of declaration order.
 
 ### Environment variables
 
@@ -169,7 +217,7 @@ func WithEvalContext(ctx *hcl.EvalContext) Option
 
 ### Error types
 
-- **`CycleError`** — returned when blocks have circular dependencies
+- **`CycleError`** — returned when circular dependencies are detected between blocks or attributes
 - **`DiagnosticsError`** — wraps HCL diagnostics (parse errors, unknown variables, etc.)
 
 ```go
