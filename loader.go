@@ -51,35 +51,59 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 
 	body := file.Body
 
-	// 2. Extract schema from target struct
-	schema, _ := gohcl.ImpliedBodySchema(dst)
-
-	// 3. Extract blocks
-	content, diags := body.Content(schema)
+	// 2. Extract var blocks using PartialContent
+	varSchema := &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{Type: "var", LabelNames: []string{"name"}},
+		},
+	}
+	varContent, remainBody, diags := body.PartialContent(varSchema)
 	if diags.HasErrors() {
 		return &DiagnosticsError{Diags: diags}
 	}
 
-	// 4. Build block info list
-	blockInfos := make([]blockInfo, len(content.Blocks))
+	// 3. Extract user schema from remaining body
+	schema, _ := gohcl.ImpliedBodySchema(dst)
+	content, diags := remainBody.Content(schema)
+	if diags.HasErrors() {
+		return &DiagnosticsError{Diags: diags}
+	}
+
+	// 4. Build block info lists
+	varBlockInfos := make([]blockInfo, len(varContent.Blocks))
+	for i, block := range varContent.Blocks {
+		varBlockInfos[i] = blockInfo{
+			typeName: "var",
+			label:    block.Labels[0],
+		}
+	}
+
+	userBlockInfos := make([]blockInfo, len(content.Blocks))
 	for i, block := range content.Blocks {
 		label := ""
 		if len(block.Labels) > 0 {
 			label = block.Labels[0]
 		}
-		blockInfos[i] = blockInfo{
+		userBlockInfos[i] = blockInfo{
 			typeName: block.Type,
 			label:    label,
 			index:    i,
 		}
 	}
 
-	// 5. Build dependency graph (blocks + top-level attributes) and topological sort
-	deps := buildDependencyGraph(content.Blocks, blockInfos, content.Attributes)
+	// 5. Build dependency graph with combined blocks and topological sort
+	allBlocks := make([]*hcl.Block, 0, len(varContent.Blocks)+len(content.Blocks))
+	allBlocks = append(allBlocks, varContent.Blocks...)
+	allBlocks = append(allBlocks, content.Blocks...)
 
-	// Combined infos for topo sort: blocks first, then attributes
+	allBlockInfos := make([]blockInfo, 0, len(varBlockInfos)+len(userBlockInfos))
+	allBlockInfos = append(allBlockInfos, varBlockInfos...)
+	allBlockInfos = append(allBlockInfos, userBlockInfos...)
+
+	deps := buildDependencyGraph(allBlocks, allBlockInfos, content.Attributes)
+
 	var allInfos []blockInfo
-	allInfos = append(allInfos, blockInfos...)
+	allInfos = append(allInfos, allBlockInfos...)
 	for name := range content.Attributes {
 		allInfos = append(allInfos, blockInfo{typeName: name, isAttr: true})
 	}
@@ -132,16 +156,44 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 		attrNames[name] = true
 	}
 
-	// Group blocks by key for decoding
+	// Group var blocks by key
+	varBlocksByKey := make(map[string]*hcl.Block)
+	for i, bi := range varBlockInfos {
+		varBlocksByKey[bi.key()] = varContent.Blocks[i]
+	}
+
+	// Group user blocks by key for decoding
 	blocksByKey := make(map[string][]*hcl.Block)
 	blockInfoByKey := make(map[string][]blockInfo)
-	for i, bi := range blockInfos {
+	for i, bi := range userBlockInfos {
 		key := bi.key()
 		blocksByKey[key] = append(blocksByKey[key], content.Blocks[i])
 		blockInfoByKey[key] = append(blockInfoByKey[key], bi)
 	}
 
+	varValues := make(map[string]cty.Value)
+
 	for _, key := range sortedKeys {
+		// --- Var block ---
+		if varBlock, ok := varBlocksByKey[key]; ok {
+			attrs, diags := varBlock.Body.JustAttributes()
+			if diags.HasErrors() {
+				return &DiagnosticsError{Diags: diags}
+			}
+			defaultAttr, ok := attrs["default"]
+			if !ok {
+				return fmt.Errorf("%s:%d: var %q missing required \"default\" attribute",
+					varBlock.DefRange.Filename, varBlock.DefRange.Start.Line, varBlock.Labels[0])
+			}
+			val, diags := defaultAttr.Expr.Value(evalCtx)
+			if diags.HasErrors() {
+				return &DiagnosticsError{Diags: diags}
+			}
+			varValues[varBlock.Labels[0]] = val
+			evalCtx.Variables["var"] = cty.ObjectVal(varValues)
+			continue
+		}
+
 		// --- Top-level attribute ---
 		if attrNames[key] {
 			attr := content.Attributes[key]

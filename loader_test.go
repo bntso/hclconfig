@@ -103,6 +103,14 @@ type BadFieldConfig struct {
 	Count    int            `hcl:"count,attr"`
 }
 
+type VarServiceConfig struct {
+	URL string `hcl:"url,attr"`
+}
+
+type VarTestConfig struct {
+	Service VarServiceConfig `hcl:"service,block"`
+}
+
 // --- Tests ---
 
 func TestLoadFile_Simple(t *testing.T) {
@@ -454,5 +462,148 @@ func TestLoadFile_HeredocVars(t *testing.T) {
 	}
 	if !strings.Contains(inst.Build[0], "pgdg/apt.postgresql.org.sh") {
 		t.Errorf("build[0] should contain fully resolved chain, got: %q", inst.Build[0])
+	}
+}
+
+func TestLoad_Var_Basic(t *testing.T) {
+	var cfg VarTestConfig
+	err := LoadFile("testdata/var.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "http://api.example.com:8080/api"
+	if cfg.Service.URL != expected {
+		t.Errorf("service.url = %q, want %q", cfg.Service.URL, expected)
+	}
+}
+
+func TestLoad_Var_Chain(t *testing.T) {
+	src := []byte(`
+var "base" {
+  default = "example.com"
+}
+
+var "api_host" {
+  default = "api.${var.base}"
+}
+
+service {
+  url = "http://${var.api_host}/api"
+}
+`)
+	var cfg VarTestConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "http://api.example.com/api"
+	if cfg.Service.URL != expected {
+		t.Errorf("service.url = %q, want %q", cfg.Service.URL, expected)
+	}
+}
+
+func TestLoad_Var_WithEnv(t *testing.T) {
+	os.Setenv("TEST_VAR_HOST", "envhost.example.com")
+	defer os.Unsetenv("TEST_VAR_HOST")
+
+	src := []byte(`
+var "host" {
+  default = env("TEST_VAR_HOST")
+}
+
+service {
+  url = "http://${var.host}/api"
+}
+`)
+	var cfg VarTestConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "http://envhost.example.com/api"
+	if cfg.Service.URL != expected {
+		t.Errorf("service.url = %q, want %q", cfg.Service.URL, expected)
+	}
+}
+
+func TestLoad_Var_NumericType(t *testing.T) {
+	src := []byte(`
+var "api_host" {
+  default = "api.example.com"
+}
+
+var "api_port" {
+  default = 8080
+}
+
+service {
+  url = "http://${var.api_host}:${var.api_port}/api"
+}
+`)
+	var cfg VarTestConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "http://api.example.com:8080/api"
+	if cfg.Service.URL != expected {
+		t.Errorf("service.url = %q, want %q", cfg.Service.URL, expected)
+	}
+}
+
+func TestLoad_Var_MissingDefault(t *testing.T) {
+	src := []byte(`
+var "host" {
+}
+
+service {
+  url = "http://${var.host}/api"
+}
+`)
+	var cfg VarTestConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected error for missing default")
+	}
+	if !strings.Contains(err.Error(), "missing required \"default\" attribute") {
+		t.Errorf("expected missing default error, got: %v", err)
+	}
+}
+
+func TestLoad_Var_Cycle(t *testing.T) {
+	src := []byte(`
+var "a" {
+  default = "${var.b}"
+}
+
+var "b" {
+  default = "${var.a}"
+}
+`)
+	var cfg struct{}
+	err := Load(src, "test.hcl", &cfg)
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+	if _, ok := err.(*CycleError); !ok {
+		t.Fatalf("expected CycleError, got %T: %v", err, err)
+	}
+}
+
+func TestLoad_Var_NoVars(t *testing.T) {
+	// Regression: configs without var blocks should still work
+	src := []byte(`
+database {
+    host = "localhost"
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Host != "localhost" {
+		t.Errorf("host = %q, want %q", cfg.Database.Host, "localhost")
 	}
 }

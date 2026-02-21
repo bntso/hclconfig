@@ -5,7 +5,7 @@ A Go library that parses HCL configuration files with **cross-block and cross-at
 ## Install
 
 ```bash
-go get github.com/bntso/hclconfig@v0.2.1
+go get github.com/bntso/hclconfig@v0.3.0
 ```
 
 ## Usage
@@ -115,6 +115,40 @@ type Config struct {
 ```
 
 The resolution chain `mysubvar` -> `myvar` -> `instance.build` is resolved automatically regardless of declaration order.
+
+### Variables
+
+Define reusable variables with `var` blocks to avoid repetition. Variables are accessible via `${var.name}` and don't require any Go struct definition.
+
+```hcl
+var "api_host" {
+  default = "api.example.com"
+}
+
+var "api_port" {
+  default = 8080
+}
+
+service {
+  url = "http://${var.api_host}:${var.api_port}/api"
+}
+```
+
+Variables can reference other variables, environment variables, and user-defined blocks:
+
+```hcl
+var "base_domain" {
+  default = "example.com"
+}
+
+var "api_host" {
+  default = "api.${var.base_domain}"
+}
+
+var "db_host" {
+  default = env("DB_HOST")
+}
+```
 
 ### Environment variables
 
