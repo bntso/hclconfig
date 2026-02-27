@@ -607,3 +607,98 @@ database {
 		t.Errorf("host = %q, want %q", cfg.Database.Host, "localhost")
 	}
 }
+
+func TestLoad_StrictEnv_MissingVar(t *testing.T) {
+	os.Unsetenv("HCLCONFIG_MISSING_VAR")
+	src := []byte(`
+database {
+    host = env("HCLCONFIG_MISSING_VAR")
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "test.hcl", &cfg, WithStrictEnv())
+	if err == nil {
+		t.Fatal("expected error for missing env var with WithStrictEnv")
+	}
+	if !strings.Contains(err.Error(), "HCLCONFIG_MISSING_VAR") {
+		t.Errorf("error should mention the variable name, got: %v", err)
+	}
+}
+
+func TestLoad_StrictEnv_SetVar(t *testing.T) {
+	os.Setenv("HCLCONFIG_STRICT_TEST", "stricthost")
+	defer os.Unsetenv("HCLCONFIG_STRICT_TEST")
+
+	src := []byte(`
+database {
+    host = env("HCLCONFIG_STRICT_TEST")
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "test.hcl", &cfg, WithStrictEnv())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Host != "stricthost" {
+		t.Errorf("host = %q, want %q", cfg.Database.Host, "stricthost")
+	}
+}
+
+func TestLoad_StrictEnv_DefaultOff(t *testing.T) {
+	// Without WithStrictEnv, missing env vars should return empty string (existing behavior)
+	os.Unsetenv("HCLCONFIG_MISSING_VAR")
+	src := []byte(`
+database {
+    host = env("HCLCONFIG_MISSING_VAR")
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Host != "" {
+		t.Errorf("host = %q, want empty string", cfg.Database.Host)
+	}
+}
+
+func TestLoad_EnvOr_MissingVar(t *testing.T) {
+	os.Unsetenv("HCLCONFIG_MISSING_VAR")
+	src := []byte(`
+database {
+    host = env_or("HCLCONFIG_MISSING_VAR", "fallback-host")
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Host != "fallback-host" {
+		t.Errorf("host = %q, want %q", cfg.Database.Host, "fallback-host")
+	}
+}
+
+func TestLoad_EnvOr_SetVar(t *testing.T) {
+	os.Setenv("HCLCONFIG_ENVOR_TEST", "real-host")
+	defer os.Unsetenv("HCLCONFIG_ENVOR_TEST")
+
+	src := []byte(`
+database {
+    host = env_or("HCLCONFIG_ENVOR_TEST", "fallback-host")
+    port = 5432
+}
+`)
+	var cfg SimpleConfig
+	err := Load(src, "test.hcl", &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Host != "real-host" {
+		t.Errorf("host = %q, want %q", cfg.Database.Host, "real-host")
+	}
+}

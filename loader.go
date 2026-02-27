@@ -15,7 +15,8 @@ import (
 type Option func(*options)
 
 type options struct {
-	evalCtx *hcl.EvalContext
+	evalCtx   *hcl.EvalContext
+	strictEnv bool
 }
 
 // WithEvalContext provides a custom HCL EvalContext that will be merged with
@@ -23,6 +24,14 @@ type options struct {
 func WithEvalContext(ctx *hcl.EvalContext) Option {
 	return func(o *options) {
 		o.evalCtx = ctx
+	}
+}
+
+// WithStrictEnv makes the env() function return an error when an environment
+// variable is not set, instead of silently returning an empty string.
+func WithStrictEnv() Option {
+	return func(o *options) {
+		o.strictEnv = true
 	}
 }
 
@@ -114,7 +123,7 @@ func Load(src []byte, filename string, dst interface{}, opts ...Option) error {
 	}
 
 	// 6. Build eval context
-	evalCtx := newBaseEvalContext(o.evalCtx)
+	evalCtx := newBaseEvalContext(o.evalCtx, o.strictEnv)
 
 	// 7. Decode in topological order (both blocks and attributes)
 	dstVal := reflect.ValueOf(dst).Elem()
